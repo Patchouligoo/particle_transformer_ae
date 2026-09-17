@@ -259,7 +259,7 @@ particle_transformer_ae/
   setup.sh                    # LOCAL_BASE_DIR + conda env, copy from the sibling repo
   configs/file_dict.py        # copy from the sibling repo
   src/processing/preprocess.py     # sibling loader with the extended column list (implemented 2026-09-17)
-  src/processing/objects.py        # (particle_level, interaction, labels) + constants SLOTS/FEATURES/VALID, presence_mask(); phi rotation; NaN tau -> 0
+  src/processing/objects.py        # (particle_level, kin_raw, labels) + constants SLOTS/FEATURES/VALID, presence_mask(); pair features per batch from kin_raw; phi rotation; NaN tau -> 0
   src/processing/normalization.py  # pooled per-feature fit / apply / invert, JSON
   # the end-to-end check script lives outside the repo (Claude scratchpad); see 03 for its results
   src/model/blocks.py         # embedding MLP, attention block wrapper, adaLN (v2)

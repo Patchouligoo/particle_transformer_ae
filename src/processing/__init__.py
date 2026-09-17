@@ -5,6 +5,7 @@ from .normalization import (
     compute_normalization,
     apply_normalization,
     invert_normalization,
+    build_interaction_norm,
     save_normalization,
     load_normalization,
 )

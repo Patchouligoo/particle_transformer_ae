@@ -4,8 +4,15 @@ Status: agreed 2026-09-15; IMPLEMENTED 2026-09-17 in `src/processing/` (Runze as
 instead of `src/data/`, so that the notebook stays clean). Deviations from the text below, which is
 otherwise what was built:
 
-- no `kin_raw` array: `build_interaction_features(particle_level, mask)` takes the first four features
-  of `particle_level` as the four-vector; an undefined eta (MET) or m (non-fatjet) counts as 0;
+- the (n, 13, 13, 6) interaction tensor is NOT materialized (Runze, 2026-09-17: compute it per batch
+  like HAXAD, memory and time at large n). `build_arrays` returns `kin_raw` (n, 13, 4) = pt, eta, phi, m
+  with NaN for absent objects and 0 for the undefined eta of MET / m of non-fatjets;
+  `src.model.utils.build_interaction_torch` (HAXAD copy) builds the normalized pair features per batch
+  on the device inside `DPTDataSet`; `build_interaction_features(kin_raw)` is its numpy twin (agreement
+  4e-4 in normalized units, float32 cancellation in m_ij of light pairs) used for the normalization fit
+  and in checks. `compute_normalization` fits the pair-feature parameters by accumulating moments over
+  20k-event chunks (identical to a direct nanmean / nanstd to 1e-12); `build_interaction_norm(params)`
+  gives the `[(type, mean, std), ...]` spec the torch builder consumes;
 - NaN tau32 / tau43 of PRESENT fatjets are stored as 0 (Runze's decision, 2026-09-17), so `mask x valid`
   is the only missingness anywhere. Background: 7-12 percent of present fatjets have NaN tau32 / tau43
   in the skims; 98 percent of them are the diphoton clustered as a fatjet (m ~ 125 GeV, both photons
@@ -17,7 +24,7 @@ otherwise what was built:
   tau is NaN (would remove 12 percent of leading fatjets on a technicality, their pt / eta / phi / m
   being fine, and in half of those events fatjet2 would have to move up to keep the slots pt-ordered);
 - `valid.sum() == 48` (3+3+16+12+12+2), not 33 as written in an earlier version of this file;
-- the output dict has four keys only: `particle_level`, `interaction`, `process_id`, `event_weight`
+- the output dict has four keys only: `particle_level`, `kin_raw`, `process_id`, `event_weight`
   (Runze, 2026-09-17). Nothing constant or derivable is stored: `valid` became the module constant
   `VALID` (13, 7) next to `SLOTS` / `FEATURES` (it is a property of the feature list, so it belongs there
   or in the loss, not in the data), and the object mask is recomputed on the fly with
@@ -305,7 +312,7 @@ loss treatment, the encoder slot embedding.
 | check | result |
 |---|---|
 | load | 0.1-0.3 s per process; 1000 rows each, all inside the window; sum of weights: nonres 9.80e5, ttH 109.5, WN600 4.6e-5 |
-| shapes | particle_level (3000, 13, 7) float32, interaction (3000, 13, 13, 6), process_id (3000,) int64, event_weight (3000,); VALID (13, 7) sums to 48; presence_mask (3000, 13) identical before and after normalization |
+| shapes | particle_level (3000, 13, 7) float32, kin_raw (3000, 13, 4), process_id (3000,) int64, event_weight (3000,); VALID (13, 7) sums to 48; presence_mask (3000, 13) identical before and after normalization; `DPTDataSet.get_batch` returns the (B, 13, 13, 6) pair features built on the fly, equal to the numpy ones to 4e-4 |
 | presence | nonres: jet1 .46 jet2 .19 jet3 .06 jet4 .03 fatjet1 .01, leptons .00; ttH: jet1 1.00 jet4 .78 fatjet1 .39 el1 .14 mu1 .17; WN600: jet1 .95 fatjet1 .84 fatjet2 .42; photons and MET 1.00 |
 | NaN tau of present fatjets | 327 entries in the h5 with mask x valid = 1 but NaN, all tau32 / tau43, stored as 0; fatjet1: nonres 1 of 14, ttH 16 (tau32) / 26 (tau43) of 386, WN600 69 / 126 of 844. 98 percent of them are fatjets within dR < 1 of both photons, median m 125.0 GeV (the diphoton clustered as a fatjet; 36 percent of all present fatjet1 are such objects). After storing them as 0, every present-valid entry is finite |
 | rotation | max of abs(sum pt sin phi_rel) / sum pt over the photons = 5.7e-8; adding phi_yy back reproduces the detector phi of every slot; phi in [-3.1415, 3.1415] |

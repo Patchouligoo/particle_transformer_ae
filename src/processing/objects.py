@@ -13,6 +13,12 @@ nothing has to be stored for it. The one exception in the skims, tau32 / tau43 o
 fatjet (tau2 = 0, mostly the diphoton clustered as a fatjet), is stored as 0, the value a
 three-constituent fatjet has. Values stay in physical units (MeV, radians); every phi is measured from
 the diphoton system (whose azimuth is then 0) and wrapped to [-pi, pi).
+
+The 13 x 13 x 6 pair features (dEta, dPhi, dR, dpt_ratio, pt_ij, m_ij) are NOT stored per event: they
+would take ten times the memory of everything else. build_arrays returns the four-vectors kin_raw
+(n, 13, 4) they are computed from, and src.model.utils.build_interaction_torch builds them per batch
+on the device (HAXAD's approach). build_interaction_features is the numpy twin of that builder, used
+to fit the normalization and in checks.
 """
 import numpy as np
 
@@ -44,6 +50,16 @@ def presence_mask(particle_level):
     return np.nan_to_num(particle_level[..., FEATURES.index("pt")]) != 0
 
 
+def four_vectors(particle_level):
+    """(n, 13, 4) float32: pt, eta, phi, m of every object, the input of the pair-feature builders.
+    NaN for absent objects (so every pair feature involving them is NaN -> 0 after normalization),
+    0 for an undefined eta (MET) or m (massless non-fatjets)."""
+    kin = particle_level[..., :4].copy()
+    present = presence_mask(particle_level)
+    kin[present] = np.nan_to_num(kin[present])
+    return kin
+
+
 def wrap_phi(phi):
     """Wrap an angle to [-pi, pi)."""
     return (phi + np.pi) % (2 * np.pi) - np.pi
@@ -56,14 +72,14 @@ def diphoton_phi(dataframe):
     return np.arctan2(pt1 * np.sin(phi1) + pt2 * np.sin(phi2), pt1 * np.cos(phi1) + pt2 * np.cos(phi2))
 
 
-def build_arrays(dataframe, build_interaction=True):
+def build_arrays(dataframe):
     """Turn the flat DataFrame of preprocess.process_delphes_events into arrays.
 
     Returns a dict with
-        particle_level  (n, 13, 7)      float32  physical values; NaN where the object is absent or the feature undefined
-        interaction     (n, 13, 13, 6)  float32  pair features; NaN on the diagonal and for pairs with an absent object
-        process_id      (n,)            int64    label from configs/file_dict.py
-        event_weight    (n,)            float32
+        particle_level  (n, 13, 7)  float32  physical values; NaN where the object is absent or the feature undefined
+        kin_raw         (n, 13, 4)  float32  pt, eta, phi, m for the per-batch pair features (see four_vectors)
+        process_id      (n,)        int64    label from configs/file_dict.py
+        event_weight    (n,)        float32
     Slot / feature order: SLOTS, FEATURES, INTERACTION_FEATURES. presence_mask() and VALID say which
     entries carry a value.
     """
@@ -80,28 +96,24 @@ def build_arrays(dataframe, build_interaction=True):
             # nan_to_num: a present fatjet can have NaN tau32 / tau43 (tau2 = 0); stored as 0, see module docstring
             particle_level[present, s, FEATURES.index(feature)] = np.nan_to_num(values[present])
 
-    arrays = {
+    return {
         "particle_level": particle_level,
+        "kin_raw": four_vectors(particle_level),
         "process_id": dataframe["process_id"].to_numpy().astype(np.int64),
         "event_weight": dataframe["event_weight"].to_numpy(np.float32),
     }
-    if build_interaction:
-        arrays["interaction"] = build_interaction_features(particle_level)
-    return arrays
 
 
-def build_interaction_features(particle_level, chunk=10_000):
-    """(n, 13, 13, 6) pair features from the physical particle_level array.
-
-    Uses its first four features pt, eta, phi, m as the four-vector; an undefined eta or m counts as 0
-    (MET at eta = 0, non-fatjets massless). NaN on the diagonal and wherever one object is absent.
+def build_interaction_features(kin_raw, chunk=10_000):
+    """(n, 13, 13, 6) pair features from kin_raw; numpy twin of src.model.utils.build_interaction_torch
+    (they agree to ~1e-4 in normalized units, float32 cancellation in m_ij of light pairs).
+    NaN on the diagonal and wherever one of the two objects is absent.
     """
-    n = len(particle_level)
+    n = len(kin_raw)
     interaction = np.empty((n, NUM_SLOTS, NUM_SLOTS, len(INTERACTION_FEATURES)), dtype=np.float32)
     for start in range(0, n, chunk):  # chunked: the intermediates are (chunk, 13, 13) float64
-        four_vectors = np.nan_to_num(particle_level[start : start + chunk, :, :4].astype(np.float64))
-        interaction[start : start + chunk] = _pair_features(four_vectors)
-    present = presence_mask(particle_level)
+        interaction[start : start + chunk] = _pair_features(np.nan_to_num(kin_raw[start : start + chunk].astype(np.float64)))
+    present = np.isfinite(kin_raw[..., 0])
     pair_present = present[:, :, None] & present[:, None, :] & ~np.eye(NUM_SLOTS, dtype=bool)
     interaction[~pair_present] = np.nan
     return interaction
