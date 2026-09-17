@@ -271,3 +271,89 @@ Features of slots predicted absent are "don't care" outputs and are ignored. Whe
 reconstructed pt or mass, condition on the true mask. Rare slots (el2, mu2, ~0.5% of events) train
 fine with BCE, but a fixed 0.5 threshold may never fire for them in a hard reconstruction; per-slot
 thresholds or the count head fix that display problem. It does not affect training or the score.
+
+---
+
+# Data chain Q&A (same day, later)
+
+## Q5. Data loading spec and the particle-ID feature
+
+**Q (Runze):** Load the particle features of selected processes and normalize them like the haxad
+repo. Objects: 2 photons, 4 jets, 2 fatjets, 2 electrons, 2 muons, MET; 8 features (p4, btag, tau21,
+tau32, particle ID); interaction tensor `(n, N, N, n_int)`; normalization params; process labels.
+Photons included this time, with pt rather than pt_rel; global features ignored. Particle ID is not
+continuous and is implied by the slot order, so maybe drop it?
+
+**A:** Verified in the h5: `sel_photon1/2` reproduce `diphoton_mass` to 0.02 MeV; missing objects are
+NaN, never 0; MeV units; photon m = 0, electron m = 0.511 MeV, muon m = 105.7 MeV (constants);
+fatjet btag identically 0; jet btag binary; tau in [0, 1].
+
+Particle ID: agreed to drop it from the data. It is constant per slot, so it carries no information as
+a reconstruction target, and a scalar integer imposes a spurious ordinal structure. The encoder still
+needs the type because self-attention is permutation-equivariant; it gets it from a learned slot
+embedding inside the model (encoder counterpart of the decoder's `Q`), which also encodes rank.
+
+Chain: `preprocess.py` (sibling loader, extended columns) -> `objects.py` (haxad slot table with two
+photon slots + constant `valid` mask) -> `normalization.py` (haxad pooled normalizer + inverse).
+
+## Q6. Answers to the six loading questions, with checks
+
+Decisions: diphoton mass leakage is allowed (this is an AE study, not a HAXAD input); tau32 + tau43
+(tau21 was a typo); pooled normalization over all slots, no per-type switch; load the first N events
+instead of sampling.
+
+**Representativeness of contiguous slices** (20k rows each, before the window cut):
+
+| process | slice | in window | mean diphoton pt [GeV] | mean n_jet | jet1 present | mean jet1 pt [GeV] | fatjet1 present |
+|---|---|---|---|---|---|---|---|
+| yy+jjj | first / middle / last | 0.845 / 0.845 / 0.838 | 36.2 / 37.0 / 36.7 | 0.745 / 0.757 / 0.755 | 0.470 / 0.475 / 0.475 | 67.1 / 68.0 / 67.5 | 0.013 / 0.013 / 0.014 |
+| ttH | first / middle / last | 0.998 / 0.998 / 0.998 | 140.6 / 141.4 / 142.8 | 4.84 / 4.84 / 4.83 | 0.999 / 0.999 / 0.999 | 145.4 / 145.1 / 146.1 | 0.404 / 0.407 / 0.405 |
+| WN 600 | first / middle / last | 0.999 / 0.999 / 0.999 | 316.7 / 316.5 / 316.0 | 3.00 / 2.99 / 3.02 | 0.951 / 0.946 / 0.951 | 320.0 / 320.9 / 321.0 | 0.857 / 0.853 / 0.858 |
+
+So first-N loading is statistically fine and a single contiguous read.
+
+**Phi seam after rotating to the diphoton frame.** Fraction of present objects within 0.5 rad of
++-pi (the seam of a single angle):
+
+| object | yy+jjj | ttH | WN 600 |
+|---|---|---|---|
+| photon1 | 0.00 | 0.00 | 0.00 |
+| photon2 | 0.23 | 0.06 | 0.01 |
+| jet1 | 0.69 | 0.36 | 0.26 |
+| fatjet1 | 0.27 | 0.26 | 0.13 |
+| MET | 0.30 | 0.29 | 0.36 |
+
+The leading jet recoils against the diphoton, so a plain MSE on a single angle would put its
+discontinuity exactly where jets live. Moving the seam to 0 hits photon1 instead. Conclusion: never
+use a plain MSE on phi; see Q7.
+
+**Massless kinematics.** Median m/pt: jets 0.10-0.12, fatjets 0.28-0.39. Massless pairs shift
+pair masses by ~1 percent for jets, fine. Fatjet mass is the main boosted-object handle, so it is kept
+as a substructure feature; all other objects are massless.
+
+## Q7. Keep phi raw and mask it out of the MSE?
+
+**Q (Runze):** Can we simply keep phi as it is but mask it out from the MSE?
+
+**A:** Yes; the data chain is unaffected (phi stored as one raw angle, no normalization), and it is
+what production does on the input side. Cost: the latent is not pushed to encode azimuth, reconstructed
+events have no transverse geometry (no pairwise masses, delta R, MET balance from the output), MET
+becomes pt-only and photons pt + eta. The one-line alternative that keeps phi is a wrapped squared
+error for that column, `(remainder(phi_hat - phi + pi, 2 pi) - pi)^2`; cos/sin target is the third
+option. Decision: make the phi treatment a per-feature loss setting (weight 0 / wrapped / cos-sin) on
+the model side; store the raw angle in the data.
+
+## Q8. Final mask list and rotation
+
+**Q (Runze):** Keep it simple. Fatjet mass on, all other masses 0, no flags. Masks: btag only jets
+1-4, tau only fatjets, mass only fatjets; the presence head masks non-existing objects. OK? Then:
+do the rotation after all, since the diphoton p4 is available in preprocessing and gives the baseline
+phi for free.
+
+**A:** Yes. That is the constant `valid` (13 x 7) matrix; MET additionally has no eta. Two masks with
+different roles: `valid` is structural and never predicted; `mask` (n, 13) is per event and is the
+presence head's target. Reconstruction weight per entry is `mask[:, i] * valid[i, f]`. The
+normalization fit skips the same entries (NaN), which become 0 afterwards, as in production. Pairwise
+features use each object's stored mass (fatjets theirs, others 0). Rotation: phi measured from the
+massless diphoton azimuth, wrapped to [-pi, pi), stored raw; `phi_yy` kept per event to undo it.
+Implementation plan: `03_data_chain_implementation.md`.

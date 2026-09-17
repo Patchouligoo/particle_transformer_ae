@@ -1,10 +1,13 @@
 # Particle-transformer autoencoder: design plan
 
-Status: design discussed and agreed on 2026-09-15, no code written yet. Open decisions are
-collected in section 9. Companion documents in this folder:
+Status: model design agreed on 2026-09-15; data-chain decisions finalized later the same day and
+recorded in section 2 and in `03_data_chain_implementation.md`. No code written yet. Open decisions
+are collected in section 9. Companion documents in this folder:
 
 - `01_plan.md` (this file): the plan.
 - `02_design_qa.md`: the design Q&A that led to the plan, with the numerical checks quoted.
+- `03_data_chain_implementation.md`: step-by-step implementation plan of the data loading chain,
+  the first thing to build.
 - `checks/*.py`: the small scripts whose outputs are quoted in the Q&A. Run with the haxad3 python:
   `/global/common/software/m3246/HAXAD/software/haxad3/bin/python checks/<name>.py`
 
@@ -34,52 +37,58 @@ A demonstrator autoencoder in which both encoder and decoder are transformers ov
 Intended uses: an anomaly score from reconstruction (presence NLL plus kinematic MSE), an
 interpretable latent (decode `z` to objects), and a comparison against the SupCon+KL encoder.
 
-## 2. Data
+## 2. Data (decided 2026-09-15; implementation in `03_data_chain_implementation.md`)
 
-Source: the same Delphes `prod_12` skims as the sibling repo (`LOCAL_BASE_DIR` from `setup.sh`,
-`version_prod_12_all/SkimEvents/<process>/.../skimmed.h5`), diphoton mass window 105-145 GeV.
-Processes: `nonres_yy_jjj`, `ggh_yy`, `vbf_yy`, `vh_yy`, `ttH_yy` (SM, process_id 1..5) and
-`WN_HyyN_{150,200,300,600}` (BSM, process_id -1..-4).
+Source: the same Delphes `prod_12` skims as the sibling repo (`configs/file_dict.py`, `LOCAL_BASE_DIR`
+from `setup.sh`), diphoton mass window 105-145 GeV, units MeV. Processes: `nonres_yy_jjj`, `ggh_yy`,
+`vbf_yy`, `vh_yy`, `ttH_yy` (process_id 1..5) and `WN_HyyN_{150,200,300,600}` (-1..-4). This project
+deliberately allows the diphoton mass and the photon pt: it is a transformer-autoencoder study, not a
+HAXAD analysis input, so no anti-sculpting measures are taken.
 
-### 2.1 Object slots
+### 2.1 Slots and features
 
-Slots are fixed, typed, and pt-ordered within a type. This is the central structural fact: the
-decoder never has to decide *which* object a slot is, only whether it exists and what its kinematics are.
+13 fixed, typed slots, pt-ordered within a type: photon1, photon2, jet1..jet4, fatjet1, fatjet2,
+el1, el2, mu1, mu2, met. Seven features in this order: `[pt, eta, phi, m, btag, tau32, tau43]`.
+No particle-ID feature: slot identity is fixed, the model learns a slot embedding. Structural
+validity (constant, never predicted):
 
-| slot | object     | physically defined features                  |
-|------|------------|----------------------------------------------|
-| 0-3  | jet1-4     | pt, eta, phi, m, btag                        |
-| 4-5  | fatjet1-2  | pt, eta, phi, m, btag, tau32, tau43 (tau21 also available) |
-| 6-7  | electron1-2| pt, eta, phi (m is constant, excluded)       |
-| 8-9  | muon1-2    | pt, eta, phi                                 |
-| 10   | MET        | pt, phi                                      |
-| 11   | diphoton (optional, see 9) | pt, eta, delta_R (mass excluded to avoid sculpting) |
+| slot | pt | eta | phi | m | btag | tau32 | tau43 |
+|---|---|---|---|---|---|---|---|
+| photon1, photon2 | 1 | 1 | 1 | 0 | 0 | 0 | 0 |
+| jet1..jet4 | 1 | 1 | 1 | 0 | 1 | 0 | 0 |
+| fatjet1, fatjet2 | 1 | 1 | 1 | 1 | 0 | 1 | 1 |
+| el1, el2, mu1, mu2 | 1 | 1 | 1 | 0 | 0 | 0 | 0 |
+| met | 1 | 0 | 1 | 0 | 0 | 0 | 0 |
 
-### 2.2 Tensors produced by the data module
+### 2.2 Arrays produced by the data chain
 
-- `x`: `(B, M, F)` reconstruction target. Proposed `F = 8`:
-  `[pt, eta, cos(phi_rel), sin(phi_rel), m, btag, tau32, tau43]`, normalized (see 2.3).
-  If the diphoton becomes slot 11, add one `delta_R` column valid only for that slot (`F = 9`).
-- `x_in`: `(B, M, F + n_types)` encoder input = `x` with the type one-hot appended
-  (jet, fatjet, electron, muon, met[, diphoton]), one-hot zeroed for absent slots as in production.
-- `present`: `(B, M)` float, 1 where the object exists (`pt` finite and `> 0`).
-- `valid`: `(M, F)` constant bool, which features are structurally defined per slot (table above).
-  The reconstruction loss is computed only where `present[:, i] * valid[i, f]` is 1.
-- labels: `process_id`, `group_id`, `sb_id`, `diphoton_mass`, `event_weight`.
+| key | shape | content |
+|---|---|---|
+| `particle_level` | (n, 13, 7) | raw physical values, NaN where absent or undefined; 0 there after normalization |
+| `mask` | (n, 13) | 1 where the object exists (pt finite and > 0); the presence head's target |
+| `valid` | (13, 7) | the table above |
+| `kin_raw` | (n, 13, 4) | pt, eta, rotated phi, m (fatjets only, else 0) for pairwise features and a later per-batch rebuild |
+| `interaction` | (n, 13, 13, 6) | dEta, dPhi, dR, dpt_ratio, pt_ij, m_ij from the stored four-vectors; photon pair m_ij is m_yy |
+| `phi_yy` | (n,) | diphoton azimuth removed from every phi |
+| `process_id`, `event_weight`, `diphoton_mass`, `diphoton_pt`, `diphoton_delta_R` | (n,) | labels and metadata |
 
-### 2.3 Normalization and angles
+### 2.3 Conventions
 
-- Normalize per feature **per object type** (jets, fatjets, leptons, MET), fitted on the training
-  split only, NaN-ignoring, log for `pt` and `m`, then NaN -> 0. Reuse the sibling repo's normalizer
-  functions. Production ParT fits one mean/std per feature over all object types; per type keeps the
-  MSE comparable across slots (fatjet pt is much larger than jet pt).
-- Rotate every event so the diphoton system has `phi = 0` (photon phis are in the h5 as
-  `sel_photon1_phi`, `sel_photon2_phi`; MET is the fallback reference), then encode each object's
-  relative phi as `(cos, sin)`. MSE on raw phi is wrong at +-pi, and the rotation removes an
-  irrelevant degree of freedom the latent would otherwise have to carry.
-- `eta -> -eta` reflection is an optional augmentation, not for v1.
+- **Phi**: every object's phi (photons and MET included) is measured from the massless diphoton
+  azimuth and wrapped to [-pi, pi), then stored RAW: no normalization, no cos/sin. Periodicity is
+  handled in the loss (section 4). After rotation the pt-weighted sines of the two photons cancel.
+- **Masses**: fatjet mass is a substructure feature; all other objects are massless. Pairwise
+  four-vectors use the stored masses.
+- **Normalization**: pooled per feature over all slots (haxad convention), fitted NaN-ignoring on the
+  training sample: log mean-std for pt, m, pt_ij, m_ij; mean-std for dpt_ratio; clip to [0, 1] for
+  btag; none for eta, phi, tau, dEta, dPhi, dR. NaN -> 0 afterwards. Invertible, parameters in JSON.
+- **Loading**: the first N events inside the mass window per process, one contiguous chunked read
+  (contiguous slices were checked to be representative); weights rescaled by rows in file over rows
+  consumed, as in the sibling repo.
 
-### 2.4 Sparsity of the slots (measured, first 40k rows per process, 105-145 GeV)
+### 2.4 Measured facts (first 20k-40k rows per process, 105-145 GeV window)
+
+Presence fractions:
 
 | process        | jet1 | jet2 | jet3 | jet4 | fatjet1 | fatjet2 | el1  | mu1  | mean n_jets |
 |----------------|------|------|------|------|---------|---------|------|------|-------------|
@@ -88,25 +97,28 @@ decoder never has to decide *which* object a slot is, only whether it exists and
 | WN 150         | 0.87 | 0.63 | 0.35 | 0.17 | 0.26    | 0.12    | 0.08 | 0.09 | 2.0 |
 | WN 600         | 0.95 | 0.80 | 0.57 | 0.35 | 0.86    | 0.43    | 0.09 | 0.10 | 2.7 |
 
-MET is present in 100% of events; el2 and mu2 in <1%. Consequences: for most background events the
-only object is MET, absence is the majority state for 9 of 11 slots, and the presence pattern alone
-separates signal from background. Plain MSE against the zero-filled tensor is therefore the wrong
-loss (an absent jet and a real jet at the mean log-pt have identical targets). See section 4.
+Photons and MET are present in 100 percent of events; el2 and mu2 in under 1 percent. For most
+background events the only objects are the two photons and MET, so the presence pattern alone
+separates signal from background, and a plain MSE against the zero-filled tensor is the wrong loss
+(section 4). Other facts: missing objects are NaN in the files; photon m = 0, electron m = 0.511 MeV,
+muon m = 105.7 MeV, fatjet btag identically 0; median m/pt 0.10-0.12 for jets, 0.28-0.39 for fatjets;
+after rotation 69 percent of background leading jets sit within 0.5 rad of phi = +-pi (they recoil
+against the diphoton), which is why a plain MSE on the angle is excluded.
 
 ## 3. Model
 
 ### 3.1 Encoder `SlotEncoder`
 
-1. Per-object embedding MLP: `F + n_types -> d` (`d = 64` for the demonstrator, 128 later), GELU.
-   Optionally add a learned slot embedding (same shape as the decoder's `Q`) so the encoder knows the
-   rank inside a type; the one-hot only gives the type.
+1. Per-object embedding MLP: `F = 7 -> d` (`d = 64` for the demonstrator, 128 later), GELU, plus a
+   learned slot embedding (13 x d, the encoder counterpart of the decoder's `Q`) that carries object
+   type and rank. There is no particle-ID or one-hot feature in the data (decided 2026-09-15).
 2. `L_enc` bidirectional self-attention blocks (`nn.TransformerEncoderLayer`, `batch_first=True`,
    `norm_first=True`), `src_key_padding_mask = present == 0`.
 3. Pooling: a learned class token cross-attending to the object tokens (the `ClassAttnDeParT` idea),
    or a masked mean. Then `Linear(d -> 2k)` giving `mu, logvar` (`k = 2..8`). `z = mu + eps*std`
    (VAE) or `z = mu` (deterministic AE), see 9.
-4. High-level diphoton features: either a 12th token (recommended, uniform treatment) or
-   concatenated after pooling as `DPTModel` does.
+4. The two photons are ordinary slots (decided 2026-09-15), so there is no separate high-level
+   branch for now; `diphoton_pt` and `diphoton_delta_R` travel as metadata only.
 
 v1 uses **no** pairwise interaction tensor (`11x11x6`) and no talking-heads attention. v2 can port
 `SelfAttnDeParT` + `CNNEmbedding` from the production repo if the encoder turns out to be the
@@ -185,6 +197,11 @@ Total: `L = reconstruction + lam_con * SupCon(z or proj(z), group_id, tau) + bet
   training. The presence head learns from BCE only; gating the MSE with the predicted presence either
   kills its gradient (hard cut) or teaches it to call everything absent (soft gate). Checked in
   `checks/presence_grad_check.py`.
+- Per-feature loss setting: each of the 7 features gets a loss type and a weight. `phi` is stored as
+  a raw rotated angle; v1 gives it weight 0 (masked out), the switch-on is a wrapped squared error
+  `(remainder(phi_hat - phi + pi, 2 pi) - pi)^2`, and a cos/sin target is the third option. Never a
+  plain MSE on the angle (69 percent of background leading jets sit at the +-pi seam). See Q7 in
+  `02_design_qa.md`.
 - Sigmoid/Bernoulli per slot, not softmax over slots. Alternative: a count head per type with
   softmax over `0..n_max` and cross-entropy, which guarantees monotone presence (jet3 implies jet2).
 - Normalize the MSE by the number of valid present entries, not by `B*M*F`.
@@ -241,8 +258,10 @@ hard_mask = p_logit > 0     # sigmoid > 0.5, only for drawing a reconstructed ev
 particle_transformer_ae/
   setup.sh                    # LOCAL_BASE_DIR + conda env, copy from the sibling repo
   configs/file_dict.py        # copy from the sibling repo
-  src/data/preprocess.py      # sibling loader with the extended column list
-  src/data/objects.py         # (x, x_in, present, valid, labels); phi rotation; per-type normalization
+  src/processing/preprocess.py     # sibling loader with the extended column list (implemented 2026-09-17)
+  src/processing/objects.py        # (particle_level, interaction, labels) + constants SLOTS/FEATURES/VALID, presence_mask(); phi rotation; NaN tau -> 0
+  src/processing/normalization.py  # pooled per-feature fit / apply / invert, JSON
+  # the end-to-end check script lives outside the repo (Claude scratchpad); see 03 for its results
   src/model/blocks.py         # embedding MLP, attention block wrapper, adaLN (v2)
   src/model/particle_ae.py    # SlotEncoder, SlotDecoder, ParticleAE
   src/model/losses.py         # reconstruction_loss, SupCon (copy), KL (copy)
@@ -252,12 +271,9 @@ particle_transformer_ae/
   .claude/plan/               # this folder
 ```
 
-1. Copy `setup.sh` and `configs/file_dict.py`. Extend the preprocess column list: jets 1-4
-   (`pt, eta, phi, m, btag`), fatjets 1-2 (`+ tau21, tau32, tau43`), electrons/muons 1-2
-   (`pt, eta, phi, m`), `met_pt, met_phi`, `sel_photon{1,2}_phi`, `diphoton_pt, diphoton_delta_R,
-   diphoton_mass`, weights.
-2. `objects.py`: build the tensors. Test on a small slice: shapes, presence fractions reproduce the
-   table in 2.4, `valid` mask, rotation puts the diphoton at `phi = 0`, inverse normalization.
+1. `setup.sh` and `configs/file_dict.py` are already copied. Data chain (`preprocess.py`,
+   `objects.py`, `normalization.py`, check script): follow `03_data_chain_implementation.md`.
+2. Acceptance for the data chain is the check list in section 3 of that document.
 3. `particle_ae.py`: encoder and decoder. Test forward shapes and the two symmetry facts
    (`checks/slot_query_check.py`, `checks/cross_attn_check.py`).
 4. `losses.py`: reconstruction loss. Test gradient flow (`checks/presence_grad_check.py`).
@@ -268,11 +284,16 @@ particle_transformer_ae/
 
 ## 9. Open decisions (owner: Runze)
 
+Resolved 2026-09-15 (data chain): two photon slots instead of a diphoton token; pooled normalization
+per feature over all slots; no particle-ID feature; fatjet mass kept, all other masses 0; phi rotated
+to the diphoton frame, stored raw, handled in the loss; first N events per process; diphoton mass
+allowed.
+
+Still open (model side):
 - presence head: independent Bernoulli per slot (v1 proposal) vs count per type;
-- diphoton system as a 12th token (proposal) vs high-level concat after pooling;
 - latent dimension `k`, and deterministic AE vs VAE reparameterization + KL;
-- v1 without the interaction tensor (proposal);
-- normalization per object type (proposal) vs one per feature over all objects (production).
+- whether the v1 encoder consumes the interaction tensor (the data chain builds it either way);
+- phi in the loss: weight 0 (v1) vs wrapped squared error.
 
 ## 10. References
 
