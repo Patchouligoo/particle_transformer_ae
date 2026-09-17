@@ -58,6 +58,12 @@ class DPTModel(nn.Module):
         self.node_embedding = FCEmbedding(
             self.num_particle_features, self.embedding_dim, self.num_embeding_layers
         )
+        # Slot (position) embedding: one learned vector per slot, added to every event's token of that
+        # slot. Attention alone is permutation-equivariant, so without it the encoder cannot tell an
+        # electron from a photon or a muon with the same kinematics; the slots are typed and pt-ordered,
+        # so row i means the same object in every event. Replaces HAXAD's per-object type one-hot.
+        self.slot_embedding = nn.Parameter(torch.empty(self.num_particles, self.embedding_dim))
+        nn.init.trunc_normal_(self.slot_embedding, std=0.02)
 
         self.conv_embed_latent_dim = conv_embed_latent_dim
         self.num_conv_layers = num_conv_layers
@@ -106,7 +112,7 @@ class DPTModel(nn.Module):
     def encode(self, x):
         node, interaction, mask = x
 
-        node = self.node_embedding(node)
+        node = self.node_embedding(node) + self.slot_embedding  # (B, 13, d) + (13, d)
         interaction = self.interaction_embedding(interaction)
 
         node = self.self_attn_layer(node, interaction, mask)

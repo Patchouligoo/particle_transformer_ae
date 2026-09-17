@@ -112,6 +112,12 @@ against the diphoton), which is why a plain MSE on the angle is excluded.
 1. Per-object embedding MLP: `F = 7 -> d` (`d = 64` for the demonstrator, 128 later), GELU, plus a
    learned slot embedding (13 x d, the encoder counterpart of the decoder's `Q`) that carries object
    type and rank. There is no particle-ID or one-hot feature in the data (decided 2026-09-15).
+   IMPLEMENTED 2026-09-17: `DPTModel.slot_embedding` (13, 128), trunc-normal 0.02, added to the tokens
+   right after `node_embedding` in `src/model/dpt_model.py` (a copy of HAXAD's encoder without the
+   high-level branch). Verified: z was invariant under a slot permutation to 1e-7 before, changes by
+   1e-4 after (same order as the event-to-event spread at init); relabelling an electron as a muon
+   changes z, untouched events unchanged. Batches come from `GpuBatchLoader` (whole-batch
+   `DPTDataSet.get_batch` on the device, 1.8 ms per batch of 32); torch DataLoader was 30-500x slower.
 2. `L_enc` bidirectional self-attention blocks (`nn.TransformerEncoderLayer`, `batch_first=True`,
    `norm_first=True`), `src_key_padding_mask = present == 0`.
 3. Pooling: a learned class token cross-attending to the object tokens (the `ClassAttnDeParT` idea),
