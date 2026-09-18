@@ -1,6 +1,10 @@
+import math
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
+
+from src.processing.objects import FEATURES
 
 from src.model.utils import (
     CNNEmbedding,
@@ -12,6 +16,10 @@ from src.model.depart_layer import (
     SelfAttnDeParT,
     ClassAttnDeParT,
 )
+
+
+PHI = FEATURES.index("phi")
+BTAG = FEATURES.index("btag")
 
 
 class DPTModel(nn.Module):
@@ -179,13 +187,25 @@ class DPTModel(nn.Module):
         node = self.decoder_layernorm_selfattn(node)
 
         reco_output = self.output_projection_layer(node)
+        # phi is an angle: wrap the output to [-pi, pi) so it lives on the same range as the input. The wrapped loss
+        # is unchanged by this (wrap(wrap(out) - x) == wrap(out - x)) and remainder has unit gradient, unlike a tanh,
+        # which would saturate exactly where MET sits (phi = +-pi in the diphoton frame). btag stays a logit.
+        phi = torch.remainder(reco_output[..., PHI : PHI + 1] + math.pi, 2 * math.pi) - math.pi
+        reco_output = torch.cat([reco_output[..., :PHI], phi, reco_output[..., PHI + 1 :]], dim=-1)
 
         return reco_output
 
-    def forward(self, x):
+    def forward(self, x, inference=False):
+        """Returns (reco, presence, z). In training mode the btag column of reco and the presence vector are
+        logits, which is what the BCE terms of the loss expect. With inference=True both are passed through a
+        sigmoid, so reco is directly comparable to the input (btag probability) and presence is a probability."""
         z = self.encode(x)
         reco_output = self.decode(z)
         presence = self.presence_layer(z)
+        if inference:
+            btag = torch.sigmoid(reco_output[..., BTAG : BTAG + 1])
+            reco_output = torch.cat([reco_output[..., :BTAG], btag, reco_output[..., BTAG + 1 :]], dim=-1)
+            presence = torch.sigmoid(presence)
 
         return reco_output, presence, z
 

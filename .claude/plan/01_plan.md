@@ -188,6 +188,28 @@ slots and must be run as the baseline. The sibling repo's `contrastive_vae_mlp.i
 
 ## 4. Loss
 
+IMPLEMENTED 2026-09-17 in `src/model/loss.py`, `compute_loss(reco, presence_logits, target, mask, valid,
+presence_weight=1.0, reduction="mean")`. Differences from the sketch below (Runze's decisions):
+per-EVENT mean of the weighted squared error (`sum_{i,f} w e^2 / sum_{i,f} w` per event, then the batch
+mean), so every event counts equally and `reduction="none"` returns exactly the per-event anomaly
+score; phi enters from the first run with the wrapped error (no weight-0 phase, no per-feature
+weights); the BCE is the mean over the 13 slots and `presence_weight` multiplies the BCE, not the
+MSE; the returned components (`mse`, `bce`, `mse_per_feature` (7,)) are detached for logging.
+2026-09-18, after the first full training (2.4M events, 16 epochs): (a) the btag column uses
+BCEWithLogits instead of the squared error, because MSE on a 0/1 target regresses to the conditional
+probability and can never reproduce the spike at 1 (the decoder output for btag is a logit; sigmoid for
+plots); (b) the decoder wraps its phi output to [-pi, pi) with torch.remainder (unit gradient; a tanh would
+saturate exactly at +-pi where MET sits), which removes the unwrapped-phi plotting artifact without changing
+the loss. Also learned: every reco distribution is narrower than its target (MSE = conditional mean, z has 8
+dims); electron pt and fatjet tau32 shrink most. Next: per-slot / per-feature 1 - MSE/Var retention
+diagnostic, then decide the latent dimension.
+Verified on a real batch: init loss 3.20 = mse 2.51 + bce 0.694 (ln 2), per-feature mse pt 1.9, eta 1.9,
+phi 3.8 (raw radians), m 0.75, btag 0.03, tau 0.3-0.4; gradients reach every parameter; a perfect
+reconstruction with phi shifted by 2 pi gives mse 4e-14; garbage on absent slots changes nothing;
+matches a numpy reference to 8e-7; runs under bf16 autocast (loss in float32).
+
+Original sketch:
+
 ```python
 def reconstruction_loss(x_hat, p_logit, x, present, valid, lam=1.0):
     # x, x_hat: (B, M, F); p_logit, present: (B, M); valid: (M, F) bool
@@ -227,6 +249,19 @@ hard_mask = p_logit > 0     # sigmoid > 0.5, only for drawing a reconstructed ev
 ```
 
 ## 5. Training
+
+IMPLEMENTED 2026-09-17 as notebook cells in `jupyternotebooks/train_autoencoder.ipynb` (no training
+script yet): 8 processes x 50k events, shuffled, normalization fitted on everything, 80/20 contiguous
+train/val split into two device-resident `DPTDataSet`s, `GpuBatchLoader` with batch 4096 (val without
+drop_last), AdamW lr 1e-4 with a per-batch schedule (linear warm-up over 10 epochs, cosine decay to
+1e-6 at epoch 100; a LambdaLR), clip_grad_norm_ at 20 (haxad's value; the pre-clip norm is logged per
+epoch), 100 epochs with early stopping patience 10 and the best state restored (Runze, 2026-09-17;
+replaced the first version's ReduceLROnPlateau / 50 epochs / patience 5), `run_epoch` shared by train and val, per-epoch line with loss / mse / bce / lr and the
+per-feature val mse. Smoke test, 3 epochs on an A100: 16 s per epoch, 7.4 GB peak GPU memory,
+val loss 1.63 -> 1.03 -> 0.84 (mse 0.54, bce 0.30 at epoch 3); pt learned first (0.20), eta (0.98) and
+phi (1.03, raw radians) slowest. Not yet: bf16 autocast, grad clipping, checkpoint to $SCRATCH,
+fit-on-train normalization, cross-section weights.
+
 
 - Pre-batch all tensors on the GPU (as `DPTDataSet` does), `AdamW`, lr `3e-4` with linear warmup
   (5 epochs) + cosine decay, batch 1024-4096, early stopping on validation total loss, patience 10.
