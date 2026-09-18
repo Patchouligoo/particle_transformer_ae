@@ -67,3 +67,28 @@ def compute_loss(reco, presence_logits, target, mask, valid, presence_weight=1.0
     elif reduction != "none":
         raise ValueError(f"reduction must be 'mean' or 'none', got {reduction!r}")
     return loss, {name: value.detach() for name, value in components.items()}
+
+
+def supervised_contrastive_loss(pred, label, tau=0.1):
+    """Supervised Contrastive Loss (Khosla et al. 2020, Eq. 2)."""
+
+    pred = F.normalize(pred, p=2, dim=-1)
+
+    pred_dot = torch.matmul(pred, pred.T)
+    distances = torch.exp(pred_dot / tau)
+
+    others = torch.ones_like(distances).fill_diagonal_(0)
+    distances_to_others = torch.sum(distances * others, dim=-1).unsqueeze(-1)
+
+    normalized_distances = torch.log(distances / distances_to_others)
+
+    same_class = (label == label.T).fill_diagonal_(False)
+    cardinality = torch.sum(same_class, dim=-1).unsqueeze(-1).clamp(min=1)
+
+    # Static-shape masked sum (compile-friendly): equivalent to summing only the
+    # `same_class` entries, since masked-out terms contribute exactly 0. Avoids
+    # the dynamic-shape boolean fancy-indexing that forces a graph break.
+    per_term = (-1.0 / cardinality) * normalized_distances
+    masked = torch.where(same_class, per_term, torch.zeros_like(per_term))
+    return torch.sum(masked) / len(pred)
+

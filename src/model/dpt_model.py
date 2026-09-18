@@ -269,10 +269,15 @@ class DPTDataSet(Dataset):
 class GpuBatchLoader:
     """Yields whole batches by indexing the device-resident tensors of a DPTDataSet once per batch
     (torch DataLoader would build the interaction tensor one event at a time: 30-500x slower here).
-    Each batch is the 4-tuple of DPTDataSet.get_batch: particle_level, interaction, mask, label."""
+    Each batch is the 4-tuple of DPTDataSet.get_batch: particle_level, interaction, mask, label.
 
-    def __init__(self, dataset, batch_size, shuffle=True, drop_last=True):
+    weights: optional per-event sampling weights (n,). When given, each epoch draws len(self) * batch_size
+    indices WITH replacement in proportion to the weights (haxad's weighted loader), so e.g. inverse class
+    counts give every process the same share of each batch. shuffle / drop_last are then irrelevant."""
+
+    def __init__(self, dataset, batch_size, shuffle=True, drop_last=True, weights=None):
         self.dataset, self.batch_size, self.shuffle, self.drop_last = dataset, batch_size, shuffle, drop_last
+        self.weights = None if weights is None else torch.as_tensor(weights, dtype=torch.float64, device=dataset.device)
 
     def __len__(self):
         n = len(self.dataset)
@@ -280,8 +285,11 @@ class GpuBatchLoader:
 
     def __iter__(self):
         n = len(self.dataset)
-        order = torch.randperm(n, device=self.dataset.device) if self.shuffle else torch.arange(n, device=self.dataset.device)
-        if self.drop_last:
-            order = order[: len(self) * self.batch_size]
+        if self.weights is not None:
+            order = torch.multinomial(self.weights, len(self) * self.batch_size, replacement=True)
+        else:
+            order = torch.randperm(n, device=self.dataset.device) if self.shuffle else torch.arange(n, device=self.dataset.device)
+            if self.drop_last:
+                order = order[: len(self) * self.batch_size]
         for idx in order.split(self.batch_size):
             yield self.dataset.get_batch(idx)
