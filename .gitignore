@@ -1,4 +1,5 @@
 # Byte-compiled / optimized / DLL files
+model_weights/
 __pycache__/
 *.py[codz]
 *$py.class
