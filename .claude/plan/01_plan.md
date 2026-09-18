@@ -295,11 +295,21 @@ per feature over all slots; no particle-ID feature; fatjet mass kept, all other 
 to the diphoton frame, stored raw, handled in the loss; first N events per process; diphoton mass
 allowed.
 
-Still open (model side):
-- presence head: independent Bernoulli per slot (v1 proposal) vs count per type;
-- latent dimension `k`, and deterministic AE vs VAE reparameterization + KL;
-- whether the v1 encoder consumes the interaction tensor (the data chain builds it either way);
-- phi in the loss: weight 0 (v1) vs wrapped squared error.
+Still open (model side), status 2026-09-17. Implemented so far in `src/model/dpt_model.py`: encoder =
+HAXAD DPTModel + slot embedding; decoder = `slot_embedding + MLP(z)` per slot -> 4 self-attention
+blocks without pairwise bias (`use_interaction=False`) -> per-slot MLP to the 7 features;
+`forward` returns `(reco, z)`. Plain AE first; SupCon / KL later.
+- presence head, NOT implemented yet: Runze's proposal is an MLP on z with 13 sigmoid outputs; the
+  v1 plan is one linear layer on each decoder slot token. Both work; train on logits with
+  BCEWithLogits (sigmoid only for display), never gate the features by the predicted presence;
+- shared slot table: the decoder currently reuses the encoder's `slot_embedding` as its queries
+  (tied, MAE-style). Alternative: a separate decoder table (one line);
+- decoder depth == encoder depth (both `num_self_attn_layers` = 4; 0.72M vs 1.05M parameters).
+  Alternative: a separate, lighter decoder depth (MAE) so the encoder carries the information;
+- phi in the loss: weight 0 (v1) vs wrapped squared error; `VALID` includes phi, so a plain masked
+  MSE hits the +-pi seam;
+- latent dimension `k` (8 in the notebook), and deterministic AE vs VAE reparameterization + KL;
+- count-per-type presence instead of independent Bernoulli per slot.
 
 ## 10. References
 

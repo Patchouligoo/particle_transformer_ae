@@ -11,19 +11,23 @@ from src.model.utils import (
 
 
 class TalkingMultiheadSelfAttention(nn.Module):
-    """Multihead self-attention augmented with pairwise interaction features and talking heads."""
+    """Multihead self-attention with talking heads, optionally biased by pairwise interaction features.
 
-    def __init__(self, dim, num_heads, dropout=None, use_qknorm=False):
+    use_interaction=False (decoder): no interaction projection is created and the `interaction`
+    argument of forward is ignored."""
+
+    def __init__(self, dim, num_heads, dropout=None, use_qknorm=False, use_interaction=True):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
+        self.use_interaction = use_interaction
 
         self.linear_qkv = nn.Linear(dim, dim * 3)
         self.linear_out = nn.Linear(dim, dim)
 
         self.linear_talking_1 = nn.Linear(num_heads, num_heads)
         self.linear_talking_2 = nn.Linear(num_heads, num_heads)
-        self.linear_talking_int = nn.Linear(num_heads, num_heads)
+        self.linear_talking_int = nn.Linear(num_heads, num_heads) if use_interaction else None
 
         # Optional per-head QK-normalization (HyperScale-style): RMSNorm over the
         # head dimension applied to q and k before the QK^T product. Stabilizes
@@ -58,9 +62,10 @@ class TalkingMultiheadSelfAttention(nn.Module):
         attention_weights = self.linear_talking_1(attention_weights)
         attention_weights = attention_weights.permute(0, 3, 1, 2)
 
-        interaction = self.linear_talking_int(interaction)
-        interaction = interaction.permute(0, 3, 1, 2)
-        attention_weights = attention_weights + interaction
+        if self.use_interaction:
+            interaction = self.linear_talking_int(interaction)
+            interaction = interaction.permute(0, 3, 1, 2)
+            attention_weights = attention_weights + interaction
 
         attention_weights = attention_weights.masked_fill(mask.unsqueeze(1) == 0, float("-inf"))
         attention_weights = F.softmax(attention_weights, dim=-1)
@@ -95,11 +100,14 @@ class SelfAttentionBlock(nn.Module):
         layer_drop_rate,
         use_rmsnorm=False,
         use_qknorm=False,
+        use_interaction=True,
     ):
         super().__init__()
 
         self.pre_mhsa_ln = make_norm(dim, use_rmsnorm)
-        self.mhsa = TalkingMultiheadSelfAttention(dim, num_heads, drop_rate, use_qknorm=use_qknorm)
+        self.mhsa = TalkingMultiheadSelfAttention(
+            dim, num_heads, drop_rate, use_qknorm=use_qknorm, use_interaction=use_interaction
+        )
         self.post_mhsa_scale = LayerScale(layer_scale_ini_val, dim)
         self.post_mhsa_stoch_depth = StochasticDepth(layer_drop_rate)
 
@@ -111,12 +119,13 @@ class SelfAttentionBlock(nn.Module):
         # Normalizes the additive interaction-bias logits across the (tiny) head
         # axis, which can carry a meaningful mean -> keep LayerNorm (centering)
         # here even when the rest of the model uses RMSNorm.
-        self.int_pre_msha_ln = nn.LayerNorm(num_heads)
+        self.int_pre_msha_ln = nn.LayerNorm(num_heads) if use_interaction else None
 
     def forward(self, x, interaction, mask):
-        norm_interaction = self.int_pre_msha_ln(interaction)
         attended = self.pre_mhsa_ln(x)
-        attended, _ = self.mhsa(attended, norm_interaction, mask)
+        if self.int_pre_msha_ln is not None:
+            interaction = self.int_pre_msha_ln(interaction)
+        attended, _ = self.mhsa(attended, interaction, mask)
         attended = self.post_mhsa_scale(attended)
         attended = self.post_mhsa_stoch_depth(attended)
         attended = x + attended
@@ -140,6 +149,7 @@ class SelfAttnDeParT(nn.Module):
         stochastic_depth_drop_rate,
         use_rmsnorm=False,
         use_qknorm=False,
+        use_interaction=True,
     ):
         assert dim % 2 == 0, "dim must be even."
         super().__init__()
@@ -157,6 +167,7 @@ class SelfAttnDeParT(nn.Module):
                     ),
                     use_rmsnorm=use_rmsnorm,
                     use_qknorm=use_qknorm,
+                    use_interaction=use_interaction,
                 )
                 for i in range(num_attn_layers)
             ]

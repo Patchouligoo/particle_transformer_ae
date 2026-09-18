@@ -18,7 +18,7 @@ class DPTModel(nn.Module):
     def __init__(
         self,
         input_shape,
-        output_size,
+        latent_dim,
         num_self_attn_layers=4,
         num_class_attn_layers=2,
         num_heads=8,
@@ -37,7 +37,7 @@ class DPTModel(nn.Module):
         super().__init__()
 
         self.input_shape = input_shape
-        self.output_classes = output_size
+        self.latent_dim = latent_dim
         self.num_self_attn_layers = num_self_attn_layers
         self.num_class_attn_layers = num_class_attn_layers
         self.num_heads = num_heads
@@ -65,6 +65,8 @@ class DPTModel(nn.Module):
         self.slot_embedding = nn.Parameter(torch.empty(self.num_particles, self.embedding_dim))
         nn.init.trunc_normal_(self.slot_embedding, std=0.02)
 
+
+        # ----------------------- encoder layers -----------------------
         self.conv_embed_latent_dim = conv_embed_latent_dim
         self.num_conv_layers = num_conv_layers
         self.interaction_embedding = CNNEmbedding(
@@ -76,7 +78,7 @@ class DPTModel(nn.Module):
             norm_type=interaction_norm_type,
         )
 
-        self.self_attn_layer = SelfAttnDeParT(
+        self.encoder_self_attn_layer = SelfAttnDeParT(
             dim=self.embedding_dim,
             num_attn_layers=self.num_self_attn_layers,
             num_heads=self.num_heads,
@@ -87,9 +89,9 @@ class DPTModel(nn.Module):
             use_rmsnorm=self.use_rmsnorm,
             use_qknorm=self.use_qknorm,
         )
-        self.layernorm_selfattn = make_norm(self.embedding_dim, self.use_rmsnorm)
+        self.encoder_layernorm_selfattn = make_norm(self.embedding_dim, self.use_rmsnorm)
 
-        self.class_attn_layer = ClassAttnDeParT(
+        self.encoder_class_attn_layer = ClassAttnDeParT(
             dim=self.embedding_dim,
             num_class_attn_layers=self.num_class_attn_layers,
             num_heads=self.num_heads,
@@ -99,38 +101,93 @@ class DPTModel(nn.Module):
             stochastic_depth_drop_rate=self.stochastic_depth_drop_rate,
             use_rmsnorm=self.use_rmsnorm,
         )
-        self.layernorm_classattn = make_norm(self.embedding_dim, self.use_rmsnorm)
+        self.encoder_layernorm_classattn = make_norm(self.embedding_dim, self.use_rmsnorm)
 
-        self.output_layer = nn.Sequential(
+        self.encode_layer = nn.Sequential(
             nn.Linear(self.embedding_dim, self.embedding_dim),
             nn.ReLU(),
-            nn.Linear(self.embedding_dim, self.embedding_dim),
-            nn.ReLU(),
-            nn.Linear(self.embedding_dim, self.output_classes),
+            nn.Linear(self.embedding_dim, self.latent_dim),
         )
 
+        # ----------------------- decoder layers -----------------------
+        self.decoder_input_decompression = nn.Sequential(
+            nn.Linear(self.latent_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Linear(self.embedding_dim, self.embedding_dim),
+        )
+
+        self.decoder_self_attn_layer = SelfAttnDeParT(
+            dim=self.embedding_dim,
+            num_attn_layers=self.num_self_attn_layers,
+            num_heads=self.num_heads,
+            expansion=self.expansion,
+            layer_scale_ini_val=self.layer_scale_ini_val,
+            drop_rate=self.drop_rate,
+            stochastic_depth_drop_rate=self.stochastic_depth_drop_rate,
+            use_rmsnorm=self.use_rmsnorm,
+            use_qknorm=self.use_qknorm,
+            use_interaction=False,  # the decoder has no pairwise features; slot tokens attend to each other only
+        )
+        self.decoder_layernorm_selfattn = make_norm(self.embedding_dim, self.use_rmsnorm)
+
+        self.output_projection_layer = nn.Sequential(
+            nn.Linear(self.embedding_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Linear(self.embedding_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Linear(self.embedding_dim, self.num_particle_features),
+        )
+
+        # ------------------ presence layer ------------------
+        self.presence_layer = nn.Sequential(
+            nn.Linear(self.latent_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Linear(self.embedding_dim, self.embedding_dim),
+            nn.ReLU(),
+            nn.Linear(self.embedding_dim, self.num_particles),
+        )
+
+
     def encode(self, x):
+
+        # --------------- encode ---------------
         node, interaction, mask = x
 
         node = self.node_embedding(node) + self.slot_embedding  # (B, 13, d) + (13, d)
         interaction = self.interaction_embedding(interaction)
 
-        node = self.self_attn_layer(node, interaction, mask)
-        node = self.layernorm_selfattn(node)
+        node = self.encoder_self_attn_layer(node, interaction, mask)
+        node = self.encoder_layernorm_selfattn(node)
 
-        output = self.class_attn_layer(node, mask)
-        output = self.layernorm_classattn(output)
-        assert output.shape[1] == 1
-        output = output[:, 0, :]
+        z = self.encoder_class_attn_layer(node, mask)
+        z = self.encoder_layernorm_classattn(z)
+        assert z.shape[1] == 1
+        z = z[:, 0, :]
 
-        output = self.output_layer(output)
-        
-        return output
+        z = self.encode_layer(z)
+
+        return z
+
+    def decode(self, z):
+
+        # during decoding, no mask is needed, so we create one with all ones
+        mask = torch.ones(z.size(0), self.num_particles, device=z.device, dtype=torch.float32)
+
+        # --------------- decode ---------------
+        z_decompressed = self.slot_embedding + self.decoder_input_decompression(z).unsqueeze(1)  # (B, 13, d)
+        node = self.decoder_self_attn_layer(z_decompressed, interaction=None, mask=mask)
+        node = self.decoder_layernorm_selfattn(node)
+
+        reco_output = self.output_projection_layer(node)
+
+        return reco_output
 
     def forward(self, x):
         z = self.encode(x)
+        reco_output = self.decode(z)
+        presence = self.presence_layer(z)
 
-        return z
+        return reco_output, presence, z
 
 
 class DPTDataSet(Dataset):
