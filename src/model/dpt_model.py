@@ -221,7 +221,7 @@ class DPTDataSet(Dataset):
     """
 
     def __init__(
-        self, particle_level, kin_raw, mask_data, label, device, interaction_norm
+        self, particle_level, kin_raw, mask_data, process_id, group_id, device, interaction_norm
     ):
         self.device = device
         self.interaction_norm = interaction_norm
@@ -230,7 +230,9 @@ class DPTDataSet(Dataset):
         self.mask_tensor = torch.tensor(mask_data, dtype=torch.float32).to(device)
         self.kin_raw_tensor = torch.tensor(kin_raw, dtype=torch.float32).to(device)
 
-        self.label = torch.tensor(label, dtype=torch.float32).to(device)
+        # two labels per event: the process and its contrastive group (see configs/file_dict.py)
+        self.process_id = torch.tensor(process_id, dtype=torch.long).to(device)
+        self.group_id = torch.tensor(group_id, dtype=torch.long).to(device)
 
     def __len__(self):
         return len(self.particle_level_tensor)
@@ -245,7 +247,8 @@ class DPTDataSet(Dataset):
             self.particle_level_tensor[idx],
             interaction,
             self.mask_tensor[idx],
-            self.label[idx],
+            self.process_id[idx],
+            self.group_id[idx],
         )
 
     def get_batch(self, idx):
@@ -262,14 +265,15 @@ class DPTDataSet(Dataset):
             self.particle_level_tensor[idx],
             interaction,
             self.mask_tensor[idx],
-            self.label[idx],
+            self.process_id[idx],
+            self.group_id[idx],
         )
 
 
 class GpuBatchLoader:
     """Yields whole batches by indexing the device-resident tensors of a DPTDataSet once per batch
     (torch DataLoader would build the interaction tensor one event at a time: 30-500x slower here).
-    Each batch is the 4-tuple of DPTDataSet.get_batch: particle_level, interaction, mask, label.
+    Each batch is the 5-tuple of DPTDataSet.get_batch: particle_level, interaction, mask, process_id, group_id.
 
     weights: optional per-event sampling weights (n,). When given, each epoch draws len(self) * batch_size
     indices WITH replacement in proportion to the weights (haxad's weighted loader), so e.g. inverse class

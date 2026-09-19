@@ -78,7 +78,8 @@ def build_arrays(dataframe):
     Returns a dict with
         particle_level  (n, 13, 7)  float32  physical values; NaN where the object is absent or the feature undefined
         kin_raw         (n, 13, 4)  float32  pt, eta, phi, m for the per-batch pair features (see four_vectors)
-        process_id      (n,)        int64    label from configs/file_dict.py
+        process_id      (n,)        int64    per-process label (configs/file_dict.py)
+        group_id        (n,)        int64    haxad contrastive group: signal mass points share one (configs/file_dict.py)
         event_weight    (n,)        float32
     Slot / feature order: SLOTS, FEATURES, INTERACTION_FEATURES. presence_mask() and VALID say which
     entries carry a value.
@@ -100,6 +101,7 @@ def build_arrays(dataframe):
         "particle_level": particle_level,
         "kin_raw": four_vectors(particle_level),
         "process_id": dataframe["process_id"].to_numpy().astype(np.int64),
+        "group_id": dataframe["group_id"].to_numpy().astype(np.int64),
         "event_weight": dataframe["event_weight"].to_numpy(np.float32),
     }
 

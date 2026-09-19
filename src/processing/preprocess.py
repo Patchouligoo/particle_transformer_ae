@@ -69,7 +69,7 @@ def process_delphes_events(process_name, num_events_per_process=100_000):
     Returns a float32 DataFrame with one row per event: the object columns (photon1_pt, jet3_btag,
     el1_eta, met_phi, ...; NaN where the object does not exist), diphoton_mass / diphoton_pt /
     diphoton_delta_R, the event weight (luminosity x cross section, rescaled so that the loaded
-    events still represent the whole file) and process_id (see configs/file_dict.py).
+    events still represent the whole file), process_id and group_id (see configs/file_dict.py).
     """
     process = process_dict[process_name]
     dataframe, rows_read, rows_in_file = _load_first_events(process["file"], num_events_per_process)
@@ -82,5 +82,6 @@ def process_delphes_events(process_name, num_events_per_process=100_000):
         * (rows_in_file / rows_read)
     )
     dataframe["process_id"] = process["process_id"]
+    dataframe["group_id"] = process["group_id"]
     dataframe = dataframe.drop(columns=["pythia_xsec [fb]", "pythia_filter_efficiency", "sumw_presel"])
     return rename_columns(dataframe.astype("float32"))
