@@ -155,6 +155,13 @@ class DPTModel(nn.Module):
             nn.Linear(self.embedding_dim, self.num_particles),
         )
 
+        # ------------------ projection later ------------------
+        self.contrastive_projection_layer = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim * 4),
+            nn.ReLU(),
+            nn.Linear(self.latent_dim * 4, self.latent_dim * 4),
+        )
+
 
     def encode(self, x):
 
@@ -173,6 +180,8 @@ class DPTModel(nn.Module):
         z = z[:, 0, :]
 
         z = self.encode_layer(z)
+
+        z = nn.functional.normalize(z, p=2, dim=-1)  # normalize to unit hypersphere
 
         return z
 
@@ -194,6 +203,9 @@ class DPTModel(nn.Module):
         reco_output = torch.cat([reco_output[..., :PHI], phi, reco_output[..., PHI + 1 :]], dim=-1)
 
         return reco_output
+
+    def contrastive_projection(self, z):
+        return self.contrastive_projection_layer(z)
 
     def forward(self, x, inference=False):
         """Returns (reco, presence, z). In training mode the btag column of reco and the presence vector are
