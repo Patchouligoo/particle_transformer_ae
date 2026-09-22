@@ -114,4 +114,34 @@ process_dict = {
         "process_id": -15,
         "group_id": -4,
     },
+    "WlZvHv_Hyyl_200": {
+        "file": f"{base_dir}/WlZvHv_Hyyl_200/ecm_13000.00/ATLAS_fatjet_skimAll/fullmc/skimmed.h5",
+        "process_id": -16,
+        "group_id": -5,
+    },
+    "WlZvHv_Hyyl_400": {
+        "file": f"{base_dir}/WlZvHv_Hyyl_400/ecm_13000.00/ATLAS_fatjet_skimAll/fullmc/skimmed.h5",
+        "process_id": -17,
+        "group_id": -5,
+    },
+    "WlZvHv_Hyyl_600": {
+        "file": f"{base_dir}/WlZvHv_Hyyl_600/ecm_13000.00/ATLAS_fatjet_skimAll/fullmc/skimmed.h5",
+        "process_id": -18,
+        "group_id": -5,
+    },
+    "XHH_300": {
+        "file": f"{base_dir}/XHH_300/ecm_13000.00/ATLAS_fatjet_skimAll/fullmc/skimmed.h5",
+        "process_id": -19,
+        "group_id": -6,
+    },
+    "XHH_500": {
+        "file": f"{base_dir}/XHH_500/ecm_13000.00/ATLAS_fatjet_skimAll/fullmc/skimmed.h5",
+        "process_id": -20,
+        "group_id": -6,
+    },
+    "XHH_1000": {
+        "file": f"{base_dir}/XHH_1000/ecm_13000.00/ATLAS_fatjet_skimAll/fullmc/skimmed.h5",
+        "process_id": -21,
+        "group_id": -6,
+    },
 }
